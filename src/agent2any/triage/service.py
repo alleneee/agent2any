@@ -1,15 +1,21 @@
 import logging
 from collections.abc import AsyncIterator
-from typing import Literal
+from dataclasses import dataclass
 
 import anthropic
 
 from ..config import get_settings
-from .prompts import TRIAGE_SYSTEM_PROMPT
+from .prompts import TOOL_NAME_TO_CLIENT, TRIAGE_SYSTEM_PROMPT, TRIAGE_TOOLS
 
 logger = logging.getLogger(__name__)
 
-CLI_SIGNAL = '{"action":"cli"'
+
+@dataclass
+class TriageResult:
+    action: str  # "direct" | "cli"
+    client_type: str  # "claude" | "codex" | "gemini"
+    task: str
+    stream: AsyncIterator[str] | None = None
 
 
 class TriageService:
@@ -22,41 +28,42 @@ class TriageService:
         )
         self._model = settings.triage_model
 
-    async def handle(
-        self, message: str
-    ) -> tuple[Literal["direct", "cli"], AsyncIterator[str] | None]:
+    async def handle(self, message: str) -> TriageResult:
         logger.info("开始分流: %s", message[:100])
-        manager = self._client.messages.stream(
+
+        response = await self._client.messages.create(
             model=self._model,
             max_tokens=4096,
             system=TRIAGE_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": message}],
+            tools=TRIAGE_TOOLS,
         )
-        stream = await manager.__aenter__()
 
-        buffer = ""
-        is_cli = False
+        for block in response.content:
+            if block.type == "tool_use":
+                client_type = TOOL_NAME_TO_CLIENT.get(block.name, "claude")
+                input_data = block.input if isinstance(block.input, dict) else {}
+                task = input_data.get("task", message)
+                logger.info("分流结果: cli -> %s", client_type)
+                return TriageResult(
+                    action="cli",
+                    client_type=client_type,
+                    task=task,
+                )
 
-        async for text in stream.text_stream:
-            buffer += text
-            if len(buffer.lstrip()) >= len(CLI_SIGNAL):
-                if buffer.lstrip().startswith(CLI_SIGNAL):
-                    is_cli = True
-                break
-
-        if is_cli:
-            await manager.__aexit__(None, None, None)
-            logger.info("分流结果: cli")
-            return ("cli", None)
-
+        text_parts = [
+            block.text for block in response.content if block.type == "text"
+        ]
+        full_text = "".join(text_parts)
         logger.info("分流结果: direct")
 
-        async def _stream_remaining() -> AsyncIterator[str]:
-            try:
-                yield buffer
-                async for remaining in stream.text_stream:
-                    yield remaining
-            finally:
-                await manager.__aexit__(None, None, None)
+        async def _stream_text() -> AsyncIterator[str]:
+            yield full_text
 
-        return ("direct", _stream_remaining())
+        return TriageResult(
+            action="direct",
+            client_type="",
+            task=message,
+            stream=_stream_text(),
+        )
+

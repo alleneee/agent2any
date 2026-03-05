@@ -1,3 +1,3 @@
-from .service import TriageService
+from .service import TriageResult, TriageService
 
-__all__ = ["TriageService"]
+__all__ = ["TriageResult", "TriageService"]

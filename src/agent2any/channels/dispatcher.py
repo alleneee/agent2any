@@ -48,19 +48,23 @@ class MessageDispatcher:
         logger.info("_process 收到消息: channel=%s, msg_id=%s, content=%s",
                     message.channel_id, message.message_id, message.content[:100])
 
+        triage_client_type: str | None = None
+
         if settings.triage_enabled and settings.triage_api_key:
             try:
                 from ..triage import TriageService
 
                 triage_svc = TriageService()
-                action, chunks = await triage_svc.handle(message.content)
-                if action == "direct" and chunks is not None:
+                result = await triage_svc.handle(message.content)
+                if result.action == "direct" and result.stream is not None:
                     await channel.send_streaming(
                         conversation_id=message.conversation_id,
                         reply_to_message_id=message.message_id,
-                        chunks=chunks,
+                        chunks=result.stream,
                     )
                     return
+                if result.action == "cli" and result.client_type:
+                    triage_client_type = result.client_type
             except Exception:
                 logger.warning("分流服务异常，回退到CLI", exc_info=True)
 
@@ -71,7 +75,12 @@ class MessageDispatcher:
             cwd = settings.default_cwd
             max_turns = settings.default_max_turns
 
-            if hasattr(channel, "_config"):
+            if triage_client_type:
+                try:
+                    ct = ClientType(triage_client_type)
+                except ValueError:
+                    pass
+            elif hasattr(channel, "_config"):
                 cfg = channel._config
                 if hasattr(cfg, "cwd") and cfg.cwd and cfg.cwd != ".":
                     cwd = cfg.cwd
@@ -82,6 +91,13 @@ class MessageDispatcher:
                         ct = ClientType(cfg.client_type)
                     except ValueError:
                         pass
+
+            if hasattr(channel, "_config"):
+                cfg = channel._config
+                if hasattr(cfg, "cwd") and cfg.cwd and cfg.cwd != ".":
+                    cwd = cfg.cwd
+                if hasattr(cfg, "max_turns") and cfg.max_turns:
+                    max_turns = cfg.max_turns
 
             if ct == ClientType.CLAUDE:
                 return ClaudeAgent(cwd=cwd, max_turns=max_turns, session_id=session_id)

@@ -8,8 +8,8 @@ from fastapi.responses import StreamingResponse
 
 from ..config import get_settings
 from ..connections import ClientType, MessageChunk, ToolCallInfo
+from ..triage import TriageService
 from .dependencies import SessionManagerDep
-from .routing import RoutingResult, route_task
 from .schemas import ChatRequest, ChatResponse, SessionInfo
 from .service import Agent, ClaudeAgent, CodexAgent, GeminiAgent
 
@@ -73,16 +73,23 @@ async def _maybe_route(request: ChatRequest, api_key: str = "") -> tuple[ClientT
     settings = get_settings()
     need_route = request.auto_route or request.client_type is None or settings.auto_route
 
-    if need_route:
+    if need_route and settings.triage_enabled and settings.triage_api_key:
         try:
-            result = await route_task(request.prompt, api_key)
-            logger.info(f"路由结果: {result.client_type.value}, task: {result.task[:50]}...")
-            return result.client_type, result.task
+            triage = TriageService()
+            result = await triage.handle(request.prompt)
+            if result.action == "cli" and result.client_type:
+                ct = ClientType(result.client_type)
+                logger.info("路由结果: %s, task: %s...", ct.value, result.task[:50])
+                return ct, result.task
+            logger.info("路由结果: direct，回退到默认客户端")
+            return ClientType.CLAUDE, request.prompt
         except Exception as e:
-            logger.warning(f"路由失败，使用默认客户端: {e}")
+            logger.warning("路由失败，使用默认客户端: %s", e)
             return ClientType.CLAUDE, request.prompt
 
-    return ClientType(request.client_type), request.prompt
+    if request.client_type:
+        return ClientType(request.client_type), request.prompt
+    return ClientType.CLAUDE, request.prompt
 
 
 @router.post("/chat", response_model=ChatResponse)

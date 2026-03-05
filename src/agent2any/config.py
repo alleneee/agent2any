@@ -21,8 +21,6 @@ class Settings(BaseSettings):
     cwd_claude: str = str(Path.home())
     cwd_codex: str = str(Path.home())
     cwd_gemini: str = str(Path.home())
-    dashscope_api_key: str = ""
-    router_model: str = "qwen-max"
     auto_route: bool = False
 
     feishu_enabled: bool = False
